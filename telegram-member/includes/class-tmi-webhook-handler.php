@@ -1,46 +1,69 @@
 <?php
-// Security: Prevent direct file access.
 if (!defined('ABSPATH')) {
 	exit;
 }
 
-/**
- * Handles incoming webhook requests from Telegram.
- */
 class TMI_Webhook_Handler {
+	private $bot_token;
 	private $request;
-	private $command_handler;
 
 	public function __construct($bot_token, WP_REST_Request $request) {
-		$this->request       = $request;
-		$api_handler         = new TMI_API_Handler($bot_token);
-		$this->command_handler = new TMI_Command_Handler($api_handler);
+		$this->bot_token = $bot_token;
+		$this->request = $request;
+		$this->log('Webhook handler initialized');
 	}
 
 	public function process() {
-		$body = $this->request->get_json_params();
+		// 获取请求原始JSON数据
+		$raw_body = $this->request->get_body();
+		$body = json_decode($raw_body, true);
+		
+		// 记录完整请求
+		$this->log("Received webhook: " . $raw_body);
 
-		// Log for debugging
-		error_log('--- TMI Webhook Received: ' . current_time('mysql') . ' ---');
-		error_log(print_r($body, true));
-
-		if (
-			!isset($body['message']['text']) ||
-			!isset($body['message']['chat']['id']) ||
-			!isset($body['message']['from']['id'])
-		) {
-			return new WP_REST_Response(['status' => 'error', 'message' => 'Invalid message format'], 400);
+		// 验证消息格式
+		if (empty($body) || !isset($body['message'])) {
+			$this->log('Invalid webhook format: missing message');
+			return new WP_REST_Response(['status' => 'invalid', 'error' => 'Missing message'], 400);
 		}
 
-		// Security: Sanitize all inputs from the untrusted webhook source.
-		$chat_id    = absint($body['message']['chat']['id']);
-		$user_id    = absint($body['message']['from']['id']);
-		$text       = sanitize_text_field($body['message']['text']);
-		$first_name = isset($body['message']['from']['first_name']) ? sanitize_text_field($body['message']['from']['first_name']) : 'User';
+		// 提取消息数据
+		$message = $body['message'];
+		
+		// 确保消息包含必要字段
+		if (!isset($message['chat']['id'], $message['from']['id'])) {
+			$this->log('Invalid message format: missing chat_id or user_id');
+			return new WP_REST_Response(['status' => 'invalid', 'error' => 'Missing chat/user ID'], 400);
+		}
 
-		// Pass the sanitized data to the command handler.
-		$this->command_handler->handle($chat_id, $user_id, $text, $first_name);
+		$chat_id = $message['chat']['id'];
+		$user_id = $message['from']['id'];
+		$text = $message['text'] ?? '';
+		$first_name = $message['from']['first_name'] ?? '用户';
 
-		return new WP_REST_Response(['status' => 'ok'], 200);
+		// 检查是否为文本消息
+		if (empty($text)) {
+			$this->log("Ignoring non-text message from chat: {$chat_id}, user: {$user_id}");
+			return new WP_REST_Response(['status' => 'ignored', 'error' => 'Non-text message'], 200);
+		}
+
+		// 处理命令
+		try {
+			$api = new TMI_API_Handler($this->bot_token);
+			$handler = new TMI_Command_Handler($api);
+			$handler->handle($chat_id, $user_id, $text, $first_name);
+			
+			// 返回成功响应给Telegram
+			return new WP_REST_Response(['status' => 'ok'], 200);
+		} catch (Exception $e) {
+			// 记录处理异常
+			$this->log("Error processing webhook: " . $e->getMessage());
+			return new WP_REST_Response(['status' => 'error', 'message' => $e->getMessage()], 500);
+		}
+	}
+
+	// 日志记录
+	private function log($message) {
+		error_log("[TMI Webhook] " . date('Y-m-d H:i:s') . " - {$message}");
 	}
 }

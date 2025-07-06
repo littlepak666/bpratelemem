@@ -1,128 +1,142 @@
 <?php
-// Security: Prevent direct file access.
 if (!defined('ABSPATH')) {
 	exit;
 }
 
-/**
- * Processes specific commands received from users.
- */
 class TMI_Command_Handler {
 	private $api_handler;
 
 	public function __construct(TMI_API_Handler $api_handler) {
 		$this->api_handler = $api_handler;
+		$this->log("✅ 命令处理器初始化成功");
 	}
 
 	public function handle($chat_id, $user_id, $text, $first_name) {
-		$core_commands = [
-			'/start'     => [$this, 'handle_start_wrapper'],
-			'註冊'     => [$this, 'handle_register_wrapper'],
-			'查詢積分' => [$this, 'handle_mycred_balance_wrapper'],
-			'會員卡'   => [$this, 'handle_member_card_wrapper'],
-			'/test'      => [$this, 'handle_test_wrapper'],
+		$this->log("\n===== 收到新指令 =====");
+		$this->log("指令内容: [{$text}]");
+		$this->log("用户ID: {$user_id}, 聊天ID: {$chat_id}");
+
+		$clean_text = trim($text);
+		$commands = [
+			'查詢積分'   => [$this, 'handle_mycred_balance'],
+			'註冊'       => [$this, 'handle_register'],
+			'會員卡'     => [$this, 'handle_member_card'],
+			'/start'     => [$this, 'handle_start'],
+			'/test'      => [$this, 'handle_test'],
 		];
 
-		// Allow addons to register their own commands.
-		$all_commands = apply_filters('tmi_register_commands', $core_commands);
-
-		if (isset($all_commands[$text])) {
-			call_user_func($all_commands[$text], $chat_id, $user_id, $first_name);
+		if (isset($commands[$clean_text])) {
+			$this->log("匹配到命令: {$clean_text}，开始执行");
+			call_user_func($commands[$clean_text], $chat_id, $user_id, $first_name);
+			$this->log("===== 指令处理结束 =====\n");
 		} else {
-			// Allow addons to handle unknown commands before the default response.
-			do_action('tmi_handle_unknown_command', $text, $chat_id, $user_id, $this->api_handler);
-			$this->handle_unknown_command($chat_id, $all_commands);
+			$this->log("未匹配到命令: {$clean_text}");
+			$this->handle_unknown($chat_id, $commands);
 		}
 	}
 
-	private function handle_unknown_command($chat_id, $commands) {
-		// Command keys are defined internally, so they are safe.
-		$command_list = implode("\n- ", array_keys($commands));
-		$message      = '無法識別的指令。請嘗試以下操作：' . "\n\n- " . $command_list;
-		$this->api_handler->send_message($chat_id, $message);
+	// 处理/start指令
+	private function handle_start($chat_id, $user_id, $first_name) {
+		$msg = "您好，{$first_name}！歡迎使用會員系統\n\n可用指令：\n• 註冊 - 成為會員\n• 查詢積分 - 查看積分和等級\n• 會員卡 - 顯示會員卡";
+		$this->send_message($chat_id, $msg);
 	}
 
-	private function handle_test($chat_id) {
-		$this->api_handler->send_message($chat_id, '✅ 測試指令成功！外掛運作正常。');
-	}
-
-	// --- Wrapper Functions: Ensure a consistent interface for all command handlers ---
-	private function handle_start_wrapper($chat_id, $user_id, $first_name) { $this->handle_start($chat_id, $first_name); }
-	private function handle_register_wrapper($chat_id, $user_id, $first_name) { $this->handle_register($chat_id, $user_id, $first_name); }
-	private function handle_mycred_balance_wrapper($chat_id, $user_id, $first_name) { $this->handle_mycred_balance($chat_id, $user_id); }
-	private function handle_member_card_wrapper($chat_id, $user_id, $first_name) { $this->handle_member_card($chat_id, $user_id); }
-	private function handle_test_wrapper($chat_id, $user_id, $first_name) { $this->handle_test($chat_id); }
-	// --- End of Wrappers ---
-
-	private function handle_start($chat_id, $first_name) {
-		// Security: Escape user-provided data before output.
-		$safe_first_name = esc_html($first_name);
-		$welcome_message = "您好，{$safe_first_name}！歡迎使用會員整合機器人。\n\n請輸入「註冊」來綁定您的帳戶。";
-		$keyboard        = [
-			'keyboard'          => [['註冊', '查詢積分'], ['會員卡']],
-			'resize_keyboard'   => true,
-			'one_time_keyboard' => false,
-		];
-		$this->api_handler->send_message($chat_id, $welcome_message, $keyboard);
-	}
-
+	// 处理註冊指令
 	private function handle_register($chat_id, $user_id, $first_name) {
-		if (get_user_by('login', 'tgvipmem_' . $user_id)) {
-			$this->api_handler->send_message($chat_id, '您已經註冊過了！');
+		$this->log("📌 执行【注册】");
+		$username = 'tgvipmem_id' . $user_id;
+
+		if (get_user_by('login', $username)) {
+			$this->send_message($chat_id, "您已注册过会员！");
 			return;
 		}
 
-		$password = wp_generate_password(12, false);
-		$username = 'tgvipmem_' . $user_id;
+		$password = wp_generate_password(12);
+		$user_id_wp = wp_create_user($username, $password);
 
-		$wp_user_id = wp_create_user($username, $password);
-
-		// Security: Safe error handling to prevent information leakage.
-		if (is_wp_error($wp_user_id)) {
-			// Log the detailed error for the admin.
-			error_log('TMI Registration Error: ' . $wp_user_id->get_error_message());
-			// Send a generic, safe message to the user.
-			$this->api_handler->send_message($chat_id, '註冊失敗，系統發生錯誤，請聯絡管理員。');
+		if (is_wp_error($user_id_wp)) {
+			$this->log("❌ 注册失败: " . $user_id_wp->get_error_message());
+			$this->send_message($chat_id, "注册失败，请重试");
 			return;
 		}
 
-		// Security: Sanitize data before saving to user meta. $user_id is already an integer.
-		update_user_meta($wp_user_id, 'telegramvip_id', $user_id);
-		update_user_meta($wp_user_id, 'first_name', $first_name); // Already sanitized in Webhook Handler
+		update_user_meta($user_id_wp, 'telegram_id', $user_id);
+		if (function_exists('mycred_add')) {
+			mycred_add('register', $user_id_wp, 100, '新会员注册奖励');
+		}
 
-		$this->api_handler->send_message($chat_id, '✅ 註冊成功！您的帳號已建立。');
+		$this->send_message($chat_id, "✅ 注册成功！获得100初始积分");
 	}
 
-	private function handle_mycred_balance($chat_id, $user_id) {
+	// 处理查詢積分指令
+	private function handle_mycred_balance($chat_id, $user_id, $first_name) {
+		$this->log("📌 执行【查詢積分】");
+
+		// 检查mycred是否可用
 		if (!function_exists('mycred_get_users_balance')) {
-			$this->api_handler->send_message($chat_id, '錯誤：myCRED 積分系統未啟用。');
+			$this->log("❌ 错误：mycred函数不存在");
+			$this->send_message($chat_id, "积分系统未启用");
 			return;
 		}
 
-		$wp_user = get_user_by('login', 'tgvipmem_' . $user_id);
-		if (!$wp_user) {
-			$this->api_handler->send_message($chat_id, '您尚未註冊，請先輸入「註冊」。');
+		// 查询用户
+		$username = 'tgvipmem_id' . $user_id;
+		$user = get_user_by('login', $username);
+		if (!$user) {
+			$this->log("❌ 用户不存在: {$username}");
+			$this->send_message($chat_id, "请先注册会员");
 			return;
 		}
 
-		$balance = mycred_get_users_balance($wp_user->ID);
-		// Security: Escape the balance output, as its format isn't guaranteed.
-		$safe_balance_message = "您的目前積分餘額為：" . esc_html($balance);
-		$this->api_handler->send_message($chat_id, $safe_balance_message);
+		// 获取积分和等级
+		$balance = mycred_get_users_balance($user->ID);
+		$level = Telegram_Member_Integration::get_member_level_with_color($balance);
+
+		$this->log("✅ 积分: {$balance}，等级: {$level['name']}");
+		$msg = "您的会员信息：\n• 积分：{$balance}\n• 等级：{$level['name']}";
+		$this->send_message($chat_id, $msg);
 	}
 
-	private function handle_member_card($chat_id, $user_id) {
-		$wp_user = get_user_by('login', 'tgvipmem_' . $user_id);
-		if (!$wp_user) {
-			$this->api_handler->send_message($chat_id, '您尚未註冊，請先輸入「註冊」。');
+	// 处理会员卡指令
+	private function handle_member_card($chat_id, $user_id, $first_name) {
+		$this->log("📌 执行【会员卡】");
+		$username = 'tgvipmem_id' . $user_id;
+		$user = get_user_by('login', $username);
+
+		if (!$user) {
+			$this->send_message($chat_id, "请先注册会员");
 			return;
 		}
 
-		// Generate a QR code with the user's Telegram ID
-		$qr_code_data = 'tgvipmem_user_id:' . $user_id;
-		$qr_code_url  = 'https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=' . urlencode($qr_code_data);
-		$caption      = "這是您的專屬會員卡 QR Code。";
+		$balance = function_exists('mycred_get_users_balance') ? mycred_get_users_balance($user->ID) : 0;
+		$level = Telegram_Member_Integration::get_member_level_with_color($balance);
+		$qr_url = 'https://api.qrserver.com/v1/create-qr-code/?data=' . urlencode($username);
 
-		$this->api_handler->send_photo($chat_id, $qr_code_url, $caption);
+		$this->api_handler->send_photo($chat_id, $qr_url, "您的会员卡\n等级：{$level['name']}\n积分：{$balance}");
+	}
+
+	// 处理测试指令
+	private function handle_test($chat_id) {
+		$this->send_message($chat_id, "✅ 测试成功，系统正常运行");
+	}
+
+	// 处理未知指令
+	private function handle_unknown($chat_id, $commands) {
+		$cmd_list = implode('、', array_keys($commands));
+		$this->send_message($chat_id, "未知指令，可用指令：{$cmd_list}");
+	}
+
+	// 发送消息封装
+	private function send_message($chat_id, $text) {
+		$this->log("📤 发送消息: {$text}");
+		$result = $this->api_handler->send_message($chat_id, $text);
+		if (isset($result['status']) && $result['status'] === 'error') {
+			$this->log("❌ 消息发送失败: " . $result['message']);
+		}
+	}
+
+	// 日志记录
+	private function log($message) {
+		error_log("[TMI Debug] " . date('H:i:s') . " - {$message}");
 	}
 }

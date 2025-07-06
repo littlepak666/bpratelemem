@@ -1,90 +1,53 @@
 <?php
 /**
  * TMI QR Code Handler
- *
- * Handles the QR code scanner admin page and AJAX point adjustments.
- *
- * @package Telegram-Member-Integration
- * @since   1.0.0
+ * 处理QR码扫描和积分调整
  */
 
-// Exit if accessed directly.
-if ( ! defined( 'ABSPATH' ) ) {
+if (!defined('ABSPATH')) {
 	exit;
 }
 
-/**
- * Final class TMI_QRCODE_HANDLER.
- */
 final class TMI_QRCODE_HANDLER {
-
-	/**
-	 * Nonce action name for security checks.
-	 *
-	 * @var string
-	 */
+	private static $instance;
 	private $nonce_action = 'tmi_adjust_points_nonce';
-
-	/**
-	 * AJAX action name.
-	 *
-	 * @var string
-	 */
 	private $ajax_action = 'tmi_adjust_points';
-
-	/**
-	 * The unique slug for the admin menu page.
-	 *
-	 * @var string
-	 */
 	private $menu_slug = 'tmi-qr-scanner';
 
-
-	/**
-	 * Constructor.
-	 *
-	 * Hooks all necessary actions for the QR code functionality.
-	 */
-	public function __construct() {
-		// Add the admin menu page.
-		add_action( 'admin_menu', [ $this, 'add_qr_scanner_page' ] );
-
-		// Enqueue scripts and styles for the scanner page.
-		add_action( 'admin_enqueue_scripts', [ $this, 'enqueue_scanner_assets' ] );
-
-		// Add the AJAX handler for points adjustment.
-		add_action( 'wp_ajax_' . $this->ajax_action, [ $this, 'handle_adjust_points_ajax' ] );
+	// 单例模式
+	public static function get_instance() {
+		if (is_null(self::$instance)) {
+			self::$instance = new self();
+		}
+		return self::$instance;
 	}
 
-	/**
-	 * Creates the admin menu page for the QR scanner.
-	 *
-	 * Uses add_menu_page to register the top-level menu item.
-	 */
-	public function add_qr_scanner_page() {
+	private function __construct() {
+		// 注册钩子（只执行一次）
+		add_action('admin_menu', [$this, 'add_menu_page']);
+		add_action('admin_enqueue_scripts', [$this, 'enqueue_assets']);
+		add_action('wp_ajax_' . $this->ajax_action, [$this, 'handle_ajax']);
+	}
+
+	// 添加后台菜单
+	public function add_menu_page() {
 		add_menu_page(
-			__( 'TelegramQR掃瞄器', 'telegram-member-integration' ), // Page Title
-			__( 'TelegramQR掃瞄器', 'telegram-member-integration' ), // Menu Title
-			'manage_options',                                     // Capability
-			$this->menu_slug,                                     // Menu Slug
-			[ $this, 'render_scanner_page_html' ],                // Callback function to render the page
-			'dashicons-camera',                                   // Icon
-			10                                                   // Position
+			'TelegramQR掃瞄器',
+			'TelegramQR掃瞄器',
+			'manage_options',
+			$this->menu_slug,
+			[$this, 'render_page'],
+			'dashicons-camera',
+			27
 		);
 	}
 
-	/**
-	 * Enqueues scripts and styles needed for the QR scanner page.
-	 *
-	 * @param string $hook The current admin page hook.
-	 */
-	public function enqueue_scanner_assets( $hook ) {
-		// Only load scripts on our specific admin page.
-		if ( 'toplevel_page_' . $this->menu_slug !== $hook ) {
+	// 加载脚本
+	public function enqueue_assets($hook) {
+		if ($hook !== 'toplevel_page_' . $this->menu_slug) {
 			return;
 		}
 
-		// Enqueue the html5-qrcode library from a CDN.
 		wp_enqueue_script(
 			'html5-qrcode',
 			'https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js',
@@ -94,172 +57,169 @@ final class TMI_QRCODE_HANDLER {
 		);
 	}
 
-	/**
-	 * Renders the HTML content for the QR scanner page.
-	 */
-	public function render_scanner_page_html() {
+	// 渲染扫描页面
+	public function render_page() {
 		?>
 		<div class="wrap">
-			<h1><?php echo esc_html__( 'TelegramQR掃瞄器 - 積分調整', 'telegram-member-integration' ); ?></h1>
-			<p><?php echo esc_html__( '請將相機對準會員的 Telegram QR Code 進行掃描。掃描成功後，下方會出現積分調整選項。', 'telegram-member-integration' ); ?></p>
+			<h1><?php echo esc_html('TelegramQR掃瞄器 - 積分調整'); ?></h1>
+			<p><?php echo esc_html('請掃描會員的QR碼進行積分調整'); ?></p>
 
-			<div id="qr-scanner-container" style="max-width: 500px; margin: 20px 0;">
-				<div id="qr-reader"></div>
+			<div id="qr-scanner" style="max-width:500px; margin:20px 0;">
+				<div id="reader"></div>
 			</div>
 
-			<div id="scan-result-container" style="display:none;">
-				<h2><?php echo esc_html__( '掃描結果與積分調整', 'telegram-member-integration' ); ?></h2>
-				<form id="points-adjustment-form">
-					<?php wp_nonce_field( $this->nonce_action ); ?>
+			<div id="result-form" style="display:none;">
+				<h2>調整積分</h2>
+				<form id="points-form">
+					<?php wp_nonce_field($this->nonce_action); ?>
 					<table class="form-table">
-						<tbody>
-							<tr>
-								<th scope="row">
-									<label for="user_id"><?php echo esc_html__( '會員 ID', 'telegram-member-integration' ); ?></label>
-								</th>
-								<td>
-									<input type="text" id="user_id" name="user_id" class="regular-text" readonly>
-									<p class="description" id="user-info"></p>
-								</td>
-							</tr>
-							<tr>
-								<th scope="row">
-									<label for="points"><?php echo esc_html__( '調整積分', 'telegram-member-integration' ); ?></label>
-								</th>
-								<td>
-									<input type="number" id="points" name="points" class="small-text" step="1" required>
-									<p class="description"><?php echo esc_html__( '輸入正數增加積分，負數減少積分。', 'telegram-member-integration' ); ?></p>
-								</td>
-							</tr>
-						</tbody>
+						<tr>
+							<th><label for="user_id">會員用戶名</label></th>
+							<td>
+								<input type="text" id="user_id" name="user_id" readonly class="regular-text">
+							</td>
+						</tr>
+						<tr>
+							<th><label for="points">積分調整</label></th>
+							<td>
+								<input type="number" id="points" name="points" step="1" required class="small-text">
+								<p class="description">正數增加，負數減少</p>
+							</td>
+						</tr>
 					</table>
-					<?php submit_button( __( '確認調整積分', 'telegram-member-integration' ), 'primary', 'submit-points' ); ?>
+					<?php submit_button('確認調整'); ?>
 				</form>
 			</div>
-			<div id="ajax-response" style="margin-top: 15px;"></div>
+
+			<div id="ajax-response" style="margin-top:15px;"></div>
 		</div>
 
-		<script type="text/javascript">
+		<script>
 			document.addEventListener('DOMContentLoaded', function() {
-				const resultContainer = document.getElementById('scan-result-container');
-				const userIdInput = document.getElementById('user_id');
-				const userInfoDisplay = document.getElementById('user-info');
-				const pointsForm = document.getElementById('points-adjustment-form');
-				const ajaxResponseDiv = document.getElementById('ajax-response');
+				let scanner = null;
+				let isProcessing = false; // 防止重复提交
 
-				function onScanSuccess(decodedText, decodedResult) {
-					// Assuming the QR code contains only the User ID.
-					console.log(`Scan result: ${decodedText}`);
-					userIdInput.value = decodedText;
-					userInfoDisplay.textContent = `正在驗證會員 ${decodedText}...`;
-					resultContainer.style.display = 'block';
-
-					// Stop scanning after a successful scan.
-					html5QrcodeScanner.clear();
-					document.getElementById('qr-scanner-container').style.display = 'none';
-
-					// You could add an extra AJAX call here to fetch user details and verify
-					// before allowing points adjustment, but for now we just show the form.
-					userInfoDisplay.textContent = `已鎖定會員 ID: ${decodedText}。請輸入要調整的積分。`;
+				// 初始化扫描器
+				function initScanner() {
+					if (scanner) return;
+					scanner = new Html5QrcodeScanner("reader", { fps: 10, qrbox: 250 });
+					scanner.render(onSuccess, onError);
 				}
 
-				function onScanError(errorMessage) {
-					// handle scan error, usually we can ignore it.
+				// 扫描成功
+				function onSuccess(text) {
+					if (isProcessing) return;
+					isProcessing = true;
+
+					document.getElementById('user_id').value = text;
+					document.getElementById('result-form').style.display = 'block';
+					document.getElementById('qr-scanner').style.display = 'none';
+
+					// 停止扫描
+					scanner.clear().then(() => {
+						scanner = null;
+						isProcessing = false;
+					});
 				}
 
-				// Initialize the scanner.
-				var html5QrcodeScanner = new Html5QrcodeScanner(
-					"qr-reader", { fps: 10, qrbox: 250 });
-				html5QrcodeScanner.render(onScanSuccess, onScanError);
+				// 扫描错误
+				function onError() {}
 
-				// Handle form submission.
-				pointsForm.addEventListener('submit', function(e) {
+				// 表单提交
+				document.getElementById('points-form').addEventListener('submit', function(e) {
 					e.preventDefault();
+					if (isProcessing) return;
+					isProcessing = true;
 
-					const submitButton = this.querySelector('input[type="submit"]');
-					submitButton.disabled = true;
-					ajaxResponseDiv.innerHTML = '<p>處理中...</p>';
+					const btn = this.querySelector('[type="submit"]');
+					btn.disabled = true;
+					document.getElementById('ajax-response').innerHTML = '<p>處理中...</p>';
 
 					const formData = new FormData(this);
-					formData.append('action', '<?php echo esc_js( $this->ajax_action ); ?>');
+					formData.append('action', '<?php echo esc_js($this->ajax_action); ?>');
 
-					fetch(ajaxurl, {
-						method: 'POST',
-						body: formData
-					})
-					.then(response => response.json())
-					.then(response => {
-						if (response.success) {
-							ajaxResponseDiv.innerHTML = `<div class="notice notice-success is-dismissible"><p>${response.data.message}</p></div>`;
-							pointsForm.reset();
-							resultContainer.style.display = 'none';
-							// Restart scanner
-							document.getElementById('qr-scanner-container').style.display = 'block';
-							html5QrcodeScanner.render(onScanSuccess, onScanError);
-						} else {
-							ajaxResponseDiv.innerHTML = `<div class="notice notice-error is-dismissible"><p>錯誤: ${response.data.message}</p></div>`;
-						}
-					})
-					.catch(error => {
-						ajaxResponseDiv.innerHTML = `<div class="notice notice-error is-dismissible"><p>請求失敗，請檢查網路連線或聯繫管理員。</p></div>`;
-						console.error('AJAX Error:', error);
-					})
-					.finally(() => {
-						submitButton.disabled = false;
-					});
+					// 发送AJAX请求
+					fetch(ajaxurl, { method: 'POST', body: formData })
+						.then(r => r.json())
+						.then(res => {
+							const div = document.getElementById('ajax-response');
+							if (res.success) {
+								div.innerHTML = `<div class="notice notice-success">${res.data.message}</div>`;
+								this.reset();
+								document.getElementById('result-form').style.display = 'none';
+								document.getElementById('qr-scanner').style.display = 'block';
+								initScanner(); // 重新扫描
+							} else {
+								div.innerHTML = `<div class="notice notice-error">${res.data.message}</div>`;
+							}
+						})
+						.catch(err => {
+							document.getElementById('ajax-response').innerHTML = 
+								'<div class="notice notice-error">請求失敗，請重試</div>';
+							console.error(err);
+						})
+						.finally(() => {
+							isProcessing = false;
+							btn.disabled = false;
+						});
 				});
+
+				// 启动扫描器
+				initScanner();
 			});
 		</script>
 		<?php
 	}
 
-	/**
-	 * Handles the AJAX request for adjusting user points.
-	 */
-	public function handle_adjust_points_ajax() {
-		// 1. Security Check: Verify the nonce.
-		check_ajax_referer( $this->nonce_action );
-
-		// 2. Permission Check: Ensure the current user has the required capability.
-		if ( ! current_user_can( 'manage_options' ) ) {
-			wp_send_json_error( [ 'message' => __( '權限不足。', 'telegram-member-integration' ) ], 403 );
+	// 处理AJAX请求
+	public function handle_ajax() {
+		// 安全验证
+		check_ajax_referer($this->nonce_action);
+		if (!current_user_can('manage_options')) {
+			wp_send_json_error(['message' => '權限不足'], 403);
 		}
 
-		// 3. Input Validation and Sanitization.
-		if ( ! isset( $_POST['user_id'] ) || empty( $_POST['user_id'] ) ) {
-			wp_send_json_error( [ 'message' => __( '錯誤：無效或遺失的會員 ID。', 'telegram-member-integration' ) ] );
-		}
-		if ( ! isset( $_POST['points'] ) || ! is_numeric( $_POST['points'] ) ) {
-			wp_send_json_error( [ 'message' => __( '錯誤：積分值必須是數字。', 'telegram-member-integration' ) ] );
-		}
+		// 获取参数
+		$username = sanitize_text_field($_POST['user_id'] ?? '');
+		$points = intval($_POST['points'] ?? 0);
 
-		$user_id = absint( $_POST['user_id'] );
-		$points  = intval( $_POST['points'] );
-
-		// 4. Core Logic: Adjust points.
-		$user = get_user_by( 'id', $user_id );
-		if ( ! $user ) {
-			wp_send_json_error( [ 'message' => sprintf( __( '錯誤：找不到 ID 為 %d 的會員。', 'telegram-member-integration' ), $user_id ) ] );
+		if (empty($username) || $points === 0) {
+			wp_send_json_error(['message' => '輸入無效']);
 		}
 
-		// Assuming points are stored in user meta with the key 'tmi_user_points'.
-		$points_meta_key = 'tmi_user_points';
-		$current_points  = (int) get_user_meta( $user_id, $points_meta_key, true );
-		$new_points      = $current_points + $points;
+		// 查找用户
+		$user = get_user_by('login', $username);
+		if (!$user) {
+			wp_send_json_error(['message' => "找不到會員: {$username}"]);
+		}
 
-		if ( update_user_meta( $user_id, $points_meta_key, $new_points ) ) {
-			// Success
-			$message = sprintf(
-				// translators: %1$s: User display name, %2$d: Points adjusted, %3$d: New total points.
-				__( '成功！會員 %1$s 的積分已調整 %2$d。新總積分：%3$d', 'telegram-member-integration' ),
-				$user->display_name,
-				$points,
-				$new_points
-			);
-			wp_send_json_success( [ 'message' => $message ] );
+		// 调整积分
+		if (function_exists('mycred_add')) {
+			$result = mycred_add('admin_adjustment', $user->ID, $points, '手動調整積分');
+			if ($result) {
+				$new = mycred_get_users_balance($user->ID);
+				wp_send_json_success([
+					'message' => "成功調整 {$user->display_name} 的積分: {$points} (新餘額: {$new})"
+				]);
+			} else {
+				wp_send_json_error(['message' => 'myCRED調整失敗']);
+			}
 		} else {
-			// Failure
-			wp_send_json_error( [ 'message' => __( '錯誤：更新會員積分時發生未知錯誤。', 'telegram-member-integration' ) ] );
+			// 不使用myCRED时直接更新元数据
+			$meta_key = 'tmi_user_points';
+			$current = (int) get_user_meta($user->ID, $meta_key, true);
+			$new = $current + $points;
+
+			if (update_user_meta($user->ID, $meta_key, $new)) {
+				wp_send_json_success([
+					'message' => "成功調整積分: {$current} → {$new}"
+				]);
+			} else {
+				wp_send_json_error(['message' => '積分更新失敗']);
+			}
 		}
 	}
 }
+
+// 初始化
+TMI_QRCODE_HANDLER::get_instance();
