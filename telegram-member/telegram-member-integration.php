@@ -3,7 +3,7 @@
  * Plugin Name: Telegram VIP Member
  * Plugin URI: https://b-pra.com
  * Description: 整合Telegram与WordPress会员系统，支持积分管理和会员等级。
- * Version: 2.7.0
+ * Version: 2.7.7
  * Author: b-pra.com
  * License: GPL-2.0+
  */
@@ -43,16 +43,23 @@ final class Telegram_Member_Integration {
         require_once TMI_PLUGIN_DIR . 'includes/class-tmi-webhook-handler.php';
         require_once TMI_PLUGIN_DIR . 'includes/class-tmi-command-handler.php';
         require_once TMI_PLUGIN_DIR . 'includes/class-tmi-qrcode-handler.php';
+        require_once TMI_PLUGIN_DIR . 'includes/class-tmi-store-handler.php';
     }
 
     // 注册钩子
     private function add_hooks() {
         add_action('admin_menu', [$this, 'register_admin_menu']);
-        add_action('admin_init', [$this, 'handle_settings_save']);
-        add_action('rest_api_init', [$this, 'register_rest_api_routes']);
+        add_action('admin_post_tmi_update_store_item', [$this, 'handle_update_store_item']);
+        add_action('admin_post_tmi_add_store_item', [$this, 'handle_add_store_item']);
+        add_action('admin_post_tmi_update_button_text', [$this, 'handle_update_button_text']);
         add_action('admin_post_tmi_send_message', [$this, 'handle_bulk_message']);
         add_action('admin_post_tmi_send_single_message', [$this, 'handle_single_message']);
         add_action('admin_post_tmi_adjust_points', [$this, 'handle_adjust_points']);
+        add_action('admin_post_tmi_send_store_item', [$this, 'handle_send_store_item']);
+        add_action('admin_post_tmi_delete_store_item', [$this, 'handle_delete_store_item']);
+        add_action('admin_post_tmi_update_order_status', [$this, 'handle_update_order_status']);
+        add_action('admin_post_tmi_delete_order', [$this, 'handle_delete_order']); // 新增订单删除钩子
+        add_action('rest_api_init', [$this, 'register_rest_api_routes']);
     }
 
     // 注册后台菜单
@@ -76,7 +83,6 @@ final class Telegram_Member_Integration {
             [$this, 'render_levels_page']
         );
 
-        // 新增查看Telegram注册会员的子菜单
         add_submenu_page(
             'tmi-settings',
             '查看Telegram注册会员',
@@ -85,16 +91,32 @@ final class Telegram_Member_Integration {
             'tmi-telegram-members',
             [$this, 'render_telegram_members_page']
         );
+
+        add_submenu_page(
+            'tmi-settings',
+            'Telegram积分商城',
+            '积分商城',
+            'manage_options',
+            'tmi-store',
+            [$this, 'render_store_page']
+        );
     }
 
     // 渲染设置页面
     public function render_settings_page() {
         $bot_token = get_option('tmi_bot_token');
         $secret_token = get_option('tmi_secret_token');
+        $saved = isset($_GET['saved']) ? 1 : 0;
         ?>
         <div class="wrap">
             <h1>Telegram 會員整合設置</h1>
-            <form method="post">
+            <?php if ($saved) : ?>
+                <div class="notice notice-success is-dismissible">
+                    <p>设置已成功保存！</p>
+                </div>
+            <?php endif; ?>
+            <form method="post" action="<?php echo admin_url('admin-post.php'); ?>">
+                <input type="hidden" name="action" value="tmi_save_settings">
                 <?php wp_nonce_field('tmi_save_settings', 'tmi_nonce'); ?>
                 <table class="form-table">
                     <tr>
@@ -121,10 +143,17 @@ final class Telegram_Member_Integration {
     // 渲染会员等级页面
     public function render_levels_page() {
         $levels = get_option('tmi_member_levels', self::get_default_levels());
+        $saved = isset($_GET['saved']) ? 1 : 0;
         ?>
         <div class="wrap">
             <h1>會員等級設置</h1>
-            <form method="post">
+            <?php if ($saved) : ?>
+                <div class="notice notice-success is-dismissible">
+                    <p>会员等级已成功保存！</p>
+                </div>
+            <?php endif; ?>
+            <form method="post" action="<?php echo admin_url('admin-post.php'); ?>">
+                <input type="hidden" name="action" value="tmi_save_levels">
                 <?php wp_nonce_field('tmi_save_levels', 'tmi_levels_nonce'); ?>
                 <div id="levels-container">
                     <?php foreach ($levels as $i => $level) : ?>
@@ -162,22 +191,96 @@ final class Telegram_Member_Integration {
         <?php
     }
 
-    // 处理设置保存
-    public function handle_settings_save() {
-        // 保存主设置
-        if (isset($_POST['tmi_nonce']) && wp_verify_nonce($_POST['tmi_nonce'], 'tmi_save_settings')) {
-            if (isset($_POST['tmi_bot_token'])) {
-                update_option('tmi_bot_token', sanitize_text_field($_POST['tmi_bot_token']));
-            }
-            if (isset($_POST['tmi_secret_token'])) {
-                update_option('tmi_secret_token', sanitize_text_field($_POST['tmi_secret_token']));
-            }
+    // 处理编辑商品保存（使用唯一ID）
+    public function handle_update_store_item() {
+        if (!current_user_can('manage_options') || !wp_verify_nonce($_POST['tmi_update_nonce'], 'tmi_update_store_item')) {
+            wp_die('权限不足或验证失败');
         }
 
-        // 保存会员等级设置
-        if (isset($_POST['tmi_levels_nonce']) && wp_verify_nonce($_POST['tmi_levels_nonce'], 'tmi_save_levels')) {
-            $levels = isset($_POST['tmi_member_levels']) ? $_POST['tmi_member_levels'] : [];
-            update_option('tmi_member_levels', $this->sanitize_levels($levels));
+        $item_unique_id = sanitize_text_field($_POST['item_unique_id'] ?? '');
+        $store_items = get_option('tmi_store_items', []);
+
+        if (empty($item_unique_id) || !isset($store_items[$item_unique_id])) {
+            wp_redirect(admin_url('admin.php?page=tmi-store&error=invalid_item_id'));
+            exit;
+        }
+
+        $updated_item = [
+            'name' => sanitize_text_field($_POST['name'] ?? ''),
+            'type' => in_array($_POST['type'] ?? '', ['add', 'cost']) ? $_POST['type'] : 'cost',
+            'points' => intval($_POST['points'] ?? 0),
+            'max_purchases' => intval($_POST['max_purchases'] ?? 0),
+            'image_url' => esc_url_raw($_POST['image_url'] ?? ''),
+            'link' => esc_url_raw($_POST['link'] ?? ''),
+            'description' => wp_kses_post($_POST['description'] ?? '')
+        ];
+
+        if (empty($updated_item['name']) || empty($updated_item['image_url']) || empty($updated_item['link']) || $updated_item['points'] < 1) {
+            wp_redirect(admin_url('admin.php?page=tmi-store&error=invalid_data'));
+            exit;
+        }
+
+        $store_items[$item_unique_id] = $updated_item;
+        update_option('tmi_store_items', $store_items);
+        wp_redirect(admin_url('admin.php?page=tmi-store&updated=1'));
+        exit;
+    }
+
+    // 处理新增商品保存（生成唯一ID）
+    public function handle_add_store_item() {
+        if (!current_user_can('manage_options') || !wp_verify_nonce($_POST['tmi_add_nonce'], 'tmi_add_store_item')) {
+            wp_die('权限不足或验证失败');
+        }
+
+        // 生成商品唯一ID（永不重复）
+        $item_unique_id = uniqid('tmi_', true);
+        $new_item = [
+            'name' => sanitize_text_field($_POST['name'] ?? ''),
+            'type' => in_array($_POST['type'] ?? '', ['add', 'cost']) ? $_POST['type'] : 'cost',
+            'points' => intval($_POST['points'] ?? 0),
+            'max_purchases' => intval($_POST['max_purchases'] ?? 0),
+            'image_url' => esc_url_raw($_POST['image_url'] ?? ''),
+            'link' => esc_url_raw($_POST['link'] ?? ''),
+            'description' => wp_kses_post($_POST['description'] ?? '')
+        ];
+
+        if (empty($new_item['name']) || empty($new_item['image_url']) || empty($new_item['link']) || $new_item['points'] < 1) {
+            wp_redirect(admin_url('admin.php?page=tmi-store&error=invalid_new_data'));
+            exit;
+        }
+
+        $store_items = get_option('tmi_store_items', []);
+        $store_items[$item_unique_id] = $new_item;
+        update_option('tmi_store_items', $store_items);
+        wp_redirect(admin_url('admin.php?page=tmi-store&added=1'));
+        exit;
+    }
+
+    // 处理按钮文字保存
+    public function handle_update_button_text() {
+        if (!current_user_can('manage_options') || !wp_verify_nonce($_POST['tmi_button_nonce'], 'tmi_update_button_text')) {
+            wp_die('权限不足或验证失败');
+        }
+
+        $button_text = sanitize_text_field($_POST['tmi_purchase_button_text'] ?? '抢購');
+        update_option('tmi_purchase_button_text', $button_text);
+        wp_redirect(admin_url('admin.php?page=tmi-store&button_updated=1'));
+        exit;
+    }
+
+    // 处理删除商品（不重新索引，保留唯一ID）
+    public function handle_delete_store_item() {
+        if (isset($_POST['tmi_delete_nonce']) && wp_verify_nonce($_POST['tmi_delete_nonce'], 'tmi_delete_store_item')) {
+            $item_unique_id = sanitize_text_field($_POST['item_unique_id']);
+            $store_items = get_option('tmi_store_items', []);
+            
+            if (isset($store_items[$item_unique_id])) {
+                unset($store_items[$item_unique_id]);
+                update_option('tmi_store_items', $store_items);
+            }
+            
+            wp_redirect(admin_url('admin.php?page=tmi-store&deleted=1'));
+            exit;
         }
     }
 
@@ -208,23 +311,21 @@ final class Telegram_Member_Integration {
     }
 
     /**
-     * 关键修复：获取会员等级（静态方法）
+     * 获取会员等级
      */
     public static function get_member_level_with_color($points) {
         $levels = get_option('tmi_member_levels', self::get_default_levels());
         $points = intval($points);
 
-        // 从高到低匹配等级
         foreach ($levels as $level) {
             if ($points >= $level['min'] && $points <= $level['max']) {
                 return [
                     'name' => $level['name'],
-                    'color' => '#000000' // 简化：不显示颜色，避免格式问题
+                    'color' => '#000000'
                 ];
             }
         }
 
-        // 积分超过最高等级时返回最高等级
         return [
             'name' => end($levels)['name'],
             'color' => '#000000'
@@ -240,7 +341,7 @@ final class Telegram_Member_Integration {
         ]);
     }
 
-    // 处理Telegram Webhook
+    // 处理Webhook
     public function handle_webhook(WP_REST_Request $request) {
         if (empty($this->bot_token)) {
             return new WP_REST_Response(['error' => '未设置Bot Token'], 500);
@@ -250,10 +351,8 @@ final class Telegram_Member_Integration {
         return $handler->process();
     }
 
-    // 新增渲染查看Telegram注册会员页面的方法
+    // 渲染会员列表页面
     public function render_telegram_members_page() {
-        $bot_token = get_option('tmi_bot_token');
-        $api = new TMI_API_Handler($bot_token);
         $telegram_members = $this->get_telegram_members();
         $levels = get_option('tmi_member_levels', self::get_default_levels());
         ?>
@@ -286,25 +385,22 @@ final class Telegram_Member_Integration {
             <table class="wp-list-table widefat fixed striped">
                 <thead>
                     <tr>
-                        <th>会员ID</th>
+                        <th>ID</th>
                         <th>用户名</th>
-                        <th>姓名</th>
+                        <th>全名</th>
                         <th>注册日期</th>
                         <th>积分</th>
-                        <th>会员等级</th>
+                        <th>等级</th>
                         <th>操作</th>
                     </tr>
                 </thead>
                 <tbody>
                     <?php foreach ($telegram_members as $member) : ?>
                         <?php
-                        $first_name = get_user_meta($member->ID, 'first_name', true);
-                        $last_name = get_user_meta($member->ID, 'last_name', true);
-                        $full_name = $first_name . ' ' . $last_name;
+                        $full_name = $member->first_name . ' ' . $member->last_name;
                         $register_date = date('Y-m-d', strtotime($member->user_registered));
                         $balance = function_exists('mycred_get_users_balance') ? mycred_get_users_balance($member->ID) : 0;
                         $level_info = self::get_member_level_with_color($balance);
-                        $level = $level_info['name'];
                         ?>
                         <tr>
                             <td><?php echo $member->ID; ?></td>
@@ -312,7 +408,7 @@ final class Telegram_Member_Integration {
                             <td><?php echo $full_name; ?></td>
                             <td><?php echo $register_date; ?></td>
                             <td><?php echo $balance; ?></td>
-                            <td><?php echo $level; ?></td>
+                            <td><?php echo $level_info['name']; ?></td>
                             <td>
                                 <form method="post" action="<?php echo admin_url('admin-post.php'); ?>">
                                     <input type="hidden" name="action" value="tmi_adjust_points">
@@ -325,7 +421,7 @@ final class Telegram_Member_Integration {
                                     <input type="hidden" name="action" value="tmi_send_single_message">
                                     <?php wp_nonce_field('tmi_send_single_message', 'tmi_single_message_nonce'); ?>
                                     <input type="hidden" name="user_id" value="<?php echo $member->ID; ?>">
-                                    <input type="text" name="message_text" class="regular-text" style="width: 100%;">
+                                    <input type="text" name="message_text" class="regular-text">
                                     <input type="submit" value="发送消息">
                                 </form>
                             </td>
@@ -337,30 +433,11 @@ final class Telegram_Member_Integration {
         <?php
     }
 
-    // 获取从Telegram注册的会员，仅获取以 tgvipmem_id 为前缀的会员
-    private function get_telegram_members() {
-        $args = array(
-            'meta_key' => 'telegram_id',
-            'meta_compare' => 'EXISTS',
-            'search' => 'tgvipmem_id*',
-            'search_columns' => array('user_login')
-        );
-        $members = get_users($args);
-
-        // 手动检查并添加 tgvipmem_id7443590855 用户
-        $specific_user = get_user_by('login', 'tgvipmem_id7443590855');
-        if ($specific_user && !in_array($specific_user, $members)) {
-            $members[] = $specific_user;
-        }
-
-        return $members;
-    }
-
     // 处理群发消息
     public function handle_bulk_message() {
         if (isset($_POST['tmi_message_nonce']) && wp_verify_nonce($_POST['tmi_message_nonce'], 'tmi_send_message')) {
-            $message_text = sanitize_text_field($_POST['tmi_message_text']);
-            $selected_level = $_POST['tmi_member_level'];
+            $message_text = sanitize_text_field($_POST['tmi_message_text'] ?? '');
+            $selected_level = sanitize_text_field($_POST['tmi_member_level'] ?? 'all');
             $bot_token = get_option('tmi_bot_token');
             $api = new TMI_API_Handler($bot_token);
             $telegram_members = $this->get_telegram_members();
@@ -382,14 +459,15 @@ final class Telegram_Member_Integration {
         }
     }
 
-    // 处理点发消息
+    // 处理单发消息
     public function handle_single_message() {
         if (isset($_POST['tmi_single_message_nonce']) && wp_verify_nonce($_POST['tmi_single_message_nonce'], 'tmi_send_single_message')) {
-            $user_id = intval($_POST['user_id']);
-            $message_text = sanitize_text_field($_POST['message_text']);
+            $user_id = intval($_POST['user_id'] ?? 0);
+            $message_text = sanitize_text_field($_POST['message_text'] ?? '');
             $bot_token = get_option('tmi_bot_token');
             $api = new TMI_API_Handler($bot_token);
             $telegram_id = get_user_meta($user_id, 'telegram_id', true);
+            
             if ($telegram_id) {
                 $api->send_message($telegram_id, $message_text);
             }
@@ -401,8 +479,8 @@ final class Telegram_Member_Integration {
     // 处理调整积分
     public function handle_adjust_points() {
         if (isset($_POST['tmi_points_nonce']) && wp_verify_nonce($_POST['tmi_points_nonce'], 'tmi_adjust_points')) {
-            $user_id = intval($_POST['user_id']);
-            $points = intval($_POST['points']);
+            $user_id = intval($_POST['user_id'] ?? 0);
+            $points = intval($_POST['points'] ?? 0);
             if (function_exists('mycred_add')) {
                 mycred_add('admin_adjustment', $user_id, $points, '手动调整积分');
             } else {
@@ -414,6 +492,494 @@ final class Telegram_Member_Integration {
             wp_redirect($_SERVER['HTTP_REFERER']);
             exit;
         }
+    }
+
+    // 渲染积分商城页面（使用唯一ID）
+    public function render_store_page() {
+        $store_items = get_option('tmi_store_items', []);
+        $levels = get_option('tmi_member_levels', self::get_default_levels());
+        $purchase_history = get_option('tmi_purchase_history', []);
+        $purchase_button_text = get_option('tmi_purchase_button_text', '抢購');
+        
+        $updated = isset($_GET['updated']) ? 1 : 0;
+        $added = isset($_GET['added']) ? 1 : 0;
+        $deleted = isset($_GET['deleted']) ? 1 : 0;
+        $button_updated = isset($_GET['button_updated']) ? 1 : 0;
+        $status_updated = isset($_GET['status_updated']) ? 1 : 0;
+        $order_deleted = isset($_GET['order_deleted']) ? 1 : 0;
+        $error = isset($_GET['error']) ? $_GET['error'] : '';
+        ?>
+        <div class="wrap">
+            <h1>Telegram积分商城</h1>
+            
+            <?php if ($updated) : ?>
+                <div class="notice notice-success is-dismissible">
+                    <p>商品已成功更新！</p>
+                </div>
+            <?php endif; ?>
+            <?php if ($added) : ?>
+                <div class="notice notice-success is-dismissible">
+                    <p>新商品已成功添加！</p>
+                </div>
+            <?php endif; ?>
+            <?php if ($deleted) : ?>
+                <div class="notice notice-success is-dismissible">
+                    <p>商品已成功删除！</p>
+                </div>
+            <?php endif; ?>
+            <?php if ($button_updated) : ?>
+                <div class="notice notice-success is-dismissible">
+                    <p>按钮文字已成功更新！</p>
+                </div>
+            <?php endif; ?>
+            <?php if ($status_updated) : ?>
+                <div class="notice notice-success is-dismissible">
+                    <p>订单状态已成功更新！</p>
+                </div>
+            <?php endif; ?>
+            <?php if ($order_deleted) : ?>
+                <div class="notice notice-success is-dismissible">
+                    <p>订单已成功删除！</p>
+                </div>
+            <?php endif; ?>
+            <?php if ($error) : ?>
+                <div class="notice notice-error is-dismissible">
+                    <p>操作失败：<?php 
+                        switch($error) {
+                            case 'invalid_item_id': echo '商品ID无效'; break;
+                            case 'invalid_data': echo '请填写完整的商品信息'; break;
+                            case 'invalid_new_data': echo '新增商品信息不完整'; break;
+                            default: echo '未知错误';
+                        }
+                    ?></p>
+                </div>
+            <?php endif; ?>
+            
+            <!-- 按钮文字设置 -->
+            <div style="background:#f9f9f9; padding:15px; margin:15px 0; border:1px solid #ddd; border-radius:4px;">
+                <h3>操作按钮文字设置</h3>
+                <form method="post" action="<?php echo admin_url('admin-post.php'); ?>">
+                    <input type="hidden" name="action" value="tmi_update_button_text">
+                    <?php wp_nonce_field('tmi_update_button_text', 'tmi_button_nonce'); ?>
+                    <table class="form-table">
+                        <tr>
+                            <th scope="row" style="width:200px;"><label for="tmi_purchase_button_text">按钮显示文字</label></th>
+                            <td>
+                                <input type="text" id="tmi_purchase_button_text" name="tmi_purchase_button_text" 
+                                    value="<?php echo esc_attr($purchase_button_text); ?>" class="regular-text" required>
+                            </td>
+                        </tr>
+                    </table>
+                    <?php submit_button('保存按钮文字'); ?>
+                </form>
+            </div>
+            
+            <!-- 现有商品管理 -->
+            <h2>现有商品管理</h2>
+            <p class="description">每个商品可独立编辑和保存，点击"编辑"展开表单</p>
+            
+            <div class="tmi-store-items">
+                <?php foreach ($store_items as $item_unique_id => $item) : ?>
+                    <div class="tmi-item-header" style="background:#f1f1f1; padding:10px; margin:5px 0; cursor:pointer; border:1px solid #ddd;">
+                        <div style="display:flex; justify-content:space-between; align-items:center;">
+                            <strong>
+                                <?php echo esc_html($item['name']); ?>
+                                <?php if ($item['type'] === 'add') : ?>
+                                    <span style="color:green; margin-left:10px;">获得: <?php echo $item['points']; ?>积分</span>
+                                <?php else : ?>
+                                    <span style="color:red; margin-left:10px;">消耗: <?php echo $item['points']; ?>积分</span>
+                                <?php endif; ?>
+                                <?php if ($item['max_purchases'] > 0) : ?>
+                                    <span style="margin-left:10px;">限购: <?php echo $item['max_purchases']; ?>次</span>
+                                <?php endif; ?>
+                            </strong>
+                            <div>
+                                <button type="button" class="tmi-toggle-item button button-small">编辑</button>
+                                <form method="post" action="<?php echo admin_url('admin-post.php'); ?>" style="display:inline;">
+                                    <input type="hidden" name="action" value="tmi_delete_store_item">
+                                    <input type="hidden" name="item_unique_id" value="<?php echo esc_attr($item_unique_id); ?>">
+                                    <?php wp_nonce_field('tmi_delete_store_item', 'tmi_delete_nonce'); ?>
+                                    <button type="submit" class="button button-small button-danger" onclick="return confirm('确定要删除这个商品吗？')">删除</button>
+                                </form>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="tmi-item-content" style="display:none; padding:15px; margin:0 5px 15px; border:1px solid #ddd; border-top:0;">
+                        <form method="post" action="<?php echo admin_url('admin-post.php'); ?>">
+                            <input type="hidden" name="action" value="tmi_update_store_item">
+                            <input type="hidden" name="item_unique_id" value="<?php echo esc_attr($item_unique_id); ?>">
+                            <?php wp_nonce_field('tmi_update_store_item', 'tmi_update_nonce'); ?>
+                            
+                            <table class="form-table">
+                                <tr>
+                                    <th><label>商品名称 <span style="color:red;">*</span></label></th>
+                                    <td>
+                                        <input type="text" name="name" 
+                                            value="<?php echo esc_attr($item['name']); ?>" class="regular-text" required>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <th><label>商品类型 <span style="color:red;">*</span></label></th>
+                                    <td>
+                                        <select name="type" required>
+                                            <option value="add" <?php selected($item['type'], 'add'); ?>>增加积分（任务/奖励）</option>
+                                            <option value="cost" <?php selected($item['type'], 'cost'); ?>>消耗积分（兑换商品）</option>
+                                        </select>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <th><label>积分数量 <span style="color:red;">*</span></label></th>
+                                    <td>
+                                        <input type="number" name="points" 
+                                            value="<?php echo esc_attr($item['points']); ?>" min="1" required>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <th><label>购买次数上限</label></th>
+                                    <td>
+                                        <input type="number" name="max_purchases" 
+                                            value="<?php echo esc_attr($item['max_purchases'] ?? 0); ?>" min="0" 
+                                            placeholder="0表示无上限">
+                                        <p class="description">设置用户最多可购买/领取的次数，0表示无限制</p>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <th><label>商品图片链接 <span style="color:red;">*</span></label></th>
+                                    <td>
+                                        <input type="text" name="image_url" 
+                                            value="<?php echo esc_attr($item['image_url']); ?>" class="regular-text" required>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <th><label>商品详情链接 <span style="color:red;">*</span></label></th>
+                                    <td>
+                                        <input type="text" name="link" 
+                                            value="<?php echo esc_attr($item['link']); ?>" class="regular-text" required>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <th><label>商品描述</label></th>
+                                    <td>
+                                        <textarea name="description" class="regular-text"><?php echo esc_textarea($item['description'] ?? ''); ?></textarea>
+                                    </td>
+                                </tr>
+                            </table>
+                            
+                            <?php submit_button('保存编辑'); ?>
+                        </form>
+                    </div>
+                <?php endforeach; ?>
+            </div>
+            
+            <!-- 新增商品区域 -->
+            <h2 style="margin-top:30px;">新增商品</h2>
+            <div style="border:1px solid #ccc; padding:15px; margin:10px 0;">
+                <form method="post" action="<?php echo admin_url('admin-post.php'); ?>">
+                    <input type="hidden" name="action" value="tmi_add_store_item">
+                    <?php wp_nonce_field('tmi_add_store_item', 'tmi_add_nonce'); ?>
+                    
+                    <table class="form-table">
+                        <tr>
+                            <th><label>商品名称 <span style="color:red;">*</span></label></th>
+                            <td>
+                                <input type="text" name="name" class="regular-text" required>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th><label>商品类型 <span style="color:red;">*</span></label></th>
+                            <td>
+                                <select name="type" required>
+                                    <option value="add">增加积分（任务/奖励）</option>
+                                    <option value="cost">消耗积分（兑换商品）</option>
+                                </select>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th><label>积分数量 <span style="color:red;">*</span></label></th>
+                            <td>
+                                <input type="number" name="points" min="1" class="regular-text" required>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th><label>购买次数上限</label></th>
+                            <td>
+                                <input type="number" name="max_purchases" min="0" value="0" 
+                                    placeholder="0表示无上限">
+                                <p class="description">设置用户最多可购买/领取的次数，0表示无限制</p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th><label>商品图片链接 <span style="color:red;">*</span></label></th>
+                            <td>
+                                <input type="text" name="image_url" class="regular-text" required>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th><label>商品详情链接 <span style="color:red;">*</span></label></th>
+                            <td>
+                                <input type="text" name="link" class="regular-text" required>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th><label>商品描述</label></th>
+                            <td>
+                                <textarea name="description" class="regular-text"></textarea>
+                            </td>
+                        </tr>
+                    </table>
+                    
+                    <?php submit_button('添加新商品'); ?>
+                </form>
+            </div>
+            
+            <!-- 发送商品信息区域 -->
+            <h2>发送商品信息</h2>
+            <form method="post" action="<?php echo admin_url('admin-post.php'); ?>">
+                <input type="hidden" name="action" value="tmi_send_store_item">
+                <?php wp_nonce_field('tmi_send_store_item', 'tmi_send_store_nonce'); ?>
+                <table class="form-table">
+                    <tr>
+                        <th scope="row"><label for="tmi_store_item_id">选择商品</label></th>
+                        <td>
+                            <select id="tmi_store_item_id" name="tmi_store_item_id" required>
+                                <option value="">-- 选择商品 --</option>
+                                <?php foreach ($store_items as $item_unique_id => $item) : ?>
+                                    <option value="<?php echo esc_attr($item_unique_id); ?>">
+                                        <?php echo esc_html($item['name']); ?>
+                                        (<?php echo $item['type'] === 'add' ? '获得' : '消耗'; ?>: <?php echo $item['points']; ?>积分)
+                                        <?php if ($item['max_purchases'] > 0) : ?>
+                                            - 限购<?php echo $item['max_purchases']; ?>次
+                                        <?php endif; ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="tmi_member_level">选择会员等级</label></th>
+                        <td>
+                            <select id="tmi_member_level" name="tmi_member_level">
+                                <option value="all">全部前置tgvipmem_id的會員</option>
+                                <?php foreach ($levels as $level) : ?>
+                                    <option value="<?php echo $level['name']; ?>"><?php echo $level['name']; ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </td>
+                    </tr>
+                </table>
+                <?php submit_button('发送商品信息'); ?>
+            </form>
+
+            <!-- 商品操作记录 -->
+            <h2>商品操作记录</h2>
+            <table class="wp-list-table widefat fixed striped">
+                <thead>
+                    <tr>
+                        <th>会员ID</th>
+                        <th>用户名</th>
+                        <th>会员积分</th>
+                        <th>会员等级</th>
+                        <th>商品名称</th>
+                        <th>操作类型</th>
+                        <th>积分变动</th>
+                        <th>订单状态</th>
+                        <th>操作时间</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($purchase_history as $index => $record) : 
+                        $user_id = $record['user_id'];
+                        $balance = function_exists('mycred_get_users_balance') ? mycred_get_users_balance($user_id) : 0;
+                        $level_info = self::get_member_level_with_color($balance);
+                        $level_name = $level_info['name'];
+                        $status = isset($record['status']) ? $record['status'] : '处理中';
+                    ?>
+                        <tr>
+                            <td><?php echo $user_id; ?></td>
+                            <td><?php echo $record['username']; ?></td>
+                            <td><?php echo $balance; ?></td>
+                            <td><?php echo $level_name; ?></td>
+                            <td><?php echo $record['item_name']; ?></td>
+                            <td><?php echo $record['type'] === 'add' ? '领取积分' : '兑换商品'; ?></td>
+                            <td><?php echo $record['type'] === 'add' ? '+'.$record['points'] : '-'.$record['points']; ?></td>
+                            <td>
+                                <form method="post" action="<?php echo admin_url('admin-post.php'); ?>" style="display:inline;">
+                                    <input type="hidden" name="action" value="tmi_update_order_status">
+                                    <input type="hidden" name="order_index" value="<?php echo $index; ?>">
+                                    <?php wp_nonce_field('tmi_update_order_status', 'tmi_status_nonce'); ?>
+                                    <select name="status" onchange="this.form.submit()">
+                                        <option value="已完成" <?php selected($status, '已完成'); ?>>已完成</option>
+                                        <option value="处理中" <?php selected($status, '处理中'); ?>>处理中</option>
+                                        <option value="已取消" <?php selected($status, '已取消'); ?>>已取消</option>
+                                    </select>
+                                </form>
+                            </td>
+                            <td><?php echo $record['purchase_time']; ?></td>
+                            <td>
+                                <form method="post" action="<?php echo admin_url('admin-post.php'); ?>" style="margin-bottom:8px;">
+                                    <input type="hidden" name="action" value="tmi_send_single_message">
+                                    <?php wp_nonce_field('tmi_send_single_message', 'tmi_single_message_nonce'); ?>
+                                    <input type="hidden" name="user_id" value="<?php echo $user_id; ?>">
+                                    <input type="text" name="message_text" class="regular-text">
+                                    <input type="submit" value="发送消息">
+                                </form>
+                                <form method="post" action="<?php echo admin_url('admin-post.php'); ?>" onsubmit="return confirm('确定要删除这条订单记录吗？');">
+                                    <input type="hidden" name="action" value="tmi_delete_order">
+                                    <input type="hidden" name="order_index" value="<?php echo $index; ?>">
+                                    <?php wp_nonce_field('tmi_delete_order', 'tmi_delete_order_nonce'); ?>
+                                    <input type="submit" value="删除订单" class="button button-danger">
+                                </form>
+                            </td>
+                        </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+
+        <script>
+        jQuery(document).ready(function($) {
+            $('.tmi-toggle-item').click(function() {
+                var $header = $(this).closest('.tmi-item-header');
+                var $content = $header.next('.tmi-item-content');
+                $content.toggle();
+            });
+
+            setTimeout(function() {
+                $('.notice.is-dismissible').fadeOut();
+            }, 5000);
+        });
+        </script>
+        <?php
+    }
+
+    // 处理发送商品信息（使用唯一ID）
+    public function handle_send_store_item() {
+        if (isset($_POST['tmi_send_store_nonce']) && wp_verify_nonce($_POST['tmi_send_store_nonce'], 'tmi_send_store_item')) {
+            $item_unique_id = sanitize_text_field($_POST['tmi_store_item_id'] ?? '');
+            $selected_level = sanitize_text_field($_POST['tmi_member_level'] ?? 'all');
+            $bot_token = get_option('tmi_bot_token');
+            $api = new TMI_API_Handler($bot_token);
+            $store_items = get_option('tmi_store_items', []);
+            
+            if (!isset($store_items[$item_unique_id])) {
+                wp_redirect($_SERVER['HTTP_REFERER'] . '&error=invalid_item');
+                exit;
+            }
+            
+            $item = $store_items[$item_unique_id];
+            $telegram_members = $this->get_telegram_members();
+            $purchase_button_text = get_option('tmi_purchase_button_text', '抢購');
+
+            $caption = "【" . ($item['type'] === 'add' ? '积分奖励' : '积分兑换') . "】{$item['name']}\n";
+            $caption .= "{$item['description']}\n";
+            $caption .= "🔗 详情链接：{$item['link']}\n";
+            $caption .= ($item['type'] === 'add' ? '可获积分: ' : '消耗积分: ') . $item['points'];
+            if ($item['max_purchases'] > 0) {
+                $caption .= "\n限购: {$item['max_purchases']}次";
+            }
+
+            // 按钮回调使用商品唯一ID
+            $keyboard = [
+                'inline_keyboard' => [
+                    [
+                        [
+                            'text' => $purchase_button_text,
+                            'callback_data' => "purchase_{$item_unique_id}"
+                        ]
+                    ]
+                ]
+            ];
+            $reply_markup_json = json_encode($keyboard);
+
+            foreach ($telegram_members as $member) {
+                $balance = function_exists('mycred_get_users_balance') ? mycred_get_users_balance($member->ID) : 0;
+                $level_info = self::get_member_level_with_color($balance);
+                $level = $level_info['name'];
+
+                if ($selected_level === 'all' || $selected_level === $level) {
+                    $telegram_id = get_user_meta($member->ID, 'telegram_id', true);
+                    if ($telegram_id && !empty($item['image_url'])) {
+                        $api->send_photo_with_keyboard(
+                            $telegram_id,
+                            $item['image_url'],
+                            $caption,
+                            $reply_markup_json
+                        );
+                    }
+                }
+            }
+            wp_redirect($_SERVER['HTTP_REFERER'] . '&sent=1');
+            exit;
+        }
+    }
+
+    // 处理订单状态更新
+    public function handle_update_order_status() {
+        if (isset($_POST['tmi_status_nonce']) && wp_verify_nonce($_POST['tmi_status_nonce'], 'tmi_update_order_status')) {
+            $order_index = intval($_POST['order_index'] ?? 0);
+            $status = sanitize_text_field($_POST['status'] ?? '处理中');
+            
+            $purchase_history = get_option('tmi_purchase_history', []);
+            
+            if (isset($purchase_history[$order_index])) {
+                $purchase_history[$order_index]['status'] = $status;
+                update_option('tmi_purchase_history', $purchase_history);
+            }
+            
+            wp_redirect($_SERVER['HTTP_REFERER'] . '&status_updated=1');
+            exit;
+        }
+    }
+
+    // 处理订单删除
+    public function handle_delete_order() {
+        if (isset($_POST['tmi_delete_order_nonce']) && wp_verify_nonce($_POST['tmi_delete_order_nonce'], 'tmi_delete_order')) {
+            $order_index = intval($_POST['order_index'] ?? 0);
+            
+            $purchase_history = get_option('tmi_purchase_history', []);
+            
+            if (isset($purchase_history[$order_index])) {
+                // 删除指定索引的订单
+                array_splice($purchase_history, $order_index, 1);
+                update_option('tmi_purchase_history', $purchase_history);
+            }
+            
+            wp_redirect($_SERVER['HTTP_REFERER'] . '&order_deleted=1');
+            exit;
+        }
+    }
+
+    // 获取Telegram会员
+    private function get_telegram_members() {
+        $args = [
+            'meta_key' => 'telegram_id',
+            'meta_compare' => 'EXISTS'
+        ];
+        $users = get_users($args);
+        
+        $admin_id = 323;
+        $admin_in_list = false;
+        foreach ($users as $user) {
+            if ($user->ID == $admin_id) {
+                $admin_in_list = true;
+                break;
+            }
+        }
+        
+        if (!$admin_in_list) {
+            $admin_user = get_user_by('id', $admin_id);
+            if ($admin_user) {
+                $telegram_id = get_user_meta($admin_id, 'telegram_id', true);
+                if (empty($telegram_id)) {
+                    update_user_meta($admin_id, 'telegram_id', '7443590855');
+                }
+                $users[] = $admin_user;
+            }
+        }
+        
+        return $users;
     }
 }
 
