@@ -12,4 +12,6 @@ includes - class-tmi-qrcode-handler.php
 
 includes - class-tmi-webhook-handler.php
 
+includes - class-tmi-store-handler
+
 telegram-member-integration.php
